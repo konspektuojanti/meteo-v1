@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="lt">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Meteo Visual Demo</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #05070a; overflow: hidden; height: 100%; }
+  canvas { display: block; }
+  #hud {
+    position: fixed; top: 10px; left: 10px; z-index: 10;
+    font-family: monospace; font-size: 12px; color: #ddd8;
+    background: #0008; padding: 8px 10px; border-radius: 6px;
+    line-height: 1.5; pointer-events: none; user-select: none;
+  }
+  #hud b { color: #fff; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+
+<script>
+/* ============================================================
+   METEO VISUAL DEMO
+   ------------------------------------------------------------
+   Kol kas visi duomenys SIMULIUOJAMI random/drift funkcija.
+   Vėliau tiesiog pakeisk `simulateData()` funkciją realiu
+   fetch() į savo sensorių serverį arba LHMT/FMI API, ir
+   priskirk state.* reikšmes iš ten. Visa vizualo logika žemiau
+   naudoja TIK `state` objektą, tad pakeitimas bus lokalizuotas.
+   ============================================================ */
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+/* ------------------------------------------------------------
+   STATE — parametrai, kuriuos naudojame vizualui.
+   Kiekvienas turi "target" (kur link driftina) ir "value"
+   (dabartinę, švelniai interpoliuojamą reikšmę), kad viskas
+   judėtų sklandžiai, ne šuoliais.
+------------------------------------------------------------- */
+const state = {
+  cloudCover:      { value: 40,  target: 40,  min: 0,   max: 100 }, // %  -> bloom
+  seaLevelPressure:{ value: 1013,target: 1013,min: 985, max: 1040}, // hPa -> taškų tinklas
+  windSpeed:       { value: 3,   target: 3,   min: 0,   max: 20  }, // m/s -> dalelių greitis
+  windDirection:   { value: 0,   target: 0,   min: 0,   max: 360 }, // laipsniai -> dalelių kryptis
+  airTemperature:  { value: 12,  target: 12,  min: -15, max: 35  }, // C -> spalvų paletė
+};
+
+/* Kas kiek laiko simuliacija persirenka naują "target" reikšmę
+   (imituojame realių duomenų atnaujinimą, pvz. kas 5-15s demo
+   greičiui; realiam API tai būtų kas 15-60min). */
+const SIM_UPDATE_MS = 6000;
+
+function randBetween(a, b) { return a + Math.random() * (b - a); }
+
+function simulateData() {
+  // TODO: čia vėliau vietoj random dėsi:
+  //   const res = await fetch('https://tavo-api.../latest');
+  //   const d = await res.json();
+  //   state.cloudCover.target = d.cloudCover; ... ir t.t.
+  for (const key in state) {
+    const p = state[key];
+    // Nedidelis, "realistiškas" žingsnis nuo dabartinės reikšmės,
+    // o ne visiškai atsitiktinis šuolis per visą diapazoną.
+    const range = p.max - p.min;
+    const step = range * randBetween(-0.18, 0.18);
+    let next = p.value + step;
+    next = Math.max(p.min, Math.min(p.max, next));
+    p.target = next;
+  }
+}
+simulateData();
+setInterval(simulateData, SIM_UPDATE_MS);
+
+/* Švelni interpoliacija kiekviename kadre link target reikšmės */
+function updateState(dt) {
+  for (const key in state) {
+    const p = state[key];
+    p.value += (p.target - p.value) * Math.min(1, dt * 0.6);
+  }
+}
+
+/* ------------------------------------------------------------
+   SPALVŲ PALETĖ pagal airTemperature
+   šalta -> pilka/ruda/tamsu, šilta -> gelsva/oranžinė
+------------------------------------------------------------- */
+function tempColor(temp, alpha) {
+  // normalizuojam -15..35 -> 0..1
+  const t = (temp - state.airTemperature.min) / (state.airTemperature.max - state.airTemperature.min);
+  // šalta paletė (pilka/rusva/tamsi)
+  const cold = { r: 70,  g: 68,  b: 66  };
+  // šilta paletė (gelsva/oranžinė)
+  const warm = { r: 255, g: 176, b: 70  };
+  const r = cold.r + (warm.r - cold.r) * t;
+  const g = cold.g + (warm.g - cold.g) * t;
+  const b = cold.b + (warm.b - cold.b) * t;
+  return `rgba(${r|0}, ${g|0}, ${b|0}, ${alpha})`;
+}
+
+/* ------------------------------------------------------------
+   TAŠKŲ TINKLAS — valdo seaLevelPressure
+   didesnis pressure -> daugiau, mažesnių taškų
+   mažesnis pressure -> mažiau, didesnių taškų
+------------------------------------------------------------- */
+function drawPressureDots(time) {
+  const p = state.seaLevelPressure;
+  const norm = (p.value - p.min) / (p.max - p.min); // 0..1
+  const spacing = 55 - norm * 30;       // 55px (žemas p.) .. 25px (aukštas p.)
+  const dotSize = 2.4 - norm * 1.4;      // didesni kai žemas p., mažesni kai aukštas
+
+  ctx.save();
+  for (let x = spacing / 2; x < W; x += spacing) {
+    for (let y = spacing / 2; y < H; y += spacing) {
+      const wobble = Math.sin(time * 0.4 + x * 0.01 + y * 0.01) * 1.2;
+      ctx.beginPath();
+      ctx.arc(x + wobble, y + wobble, Math.max(0.6, dotSize), 0, Math.PI * 2);
+      ctx.fillStyle = tempColor(state.airTemperature.value, 0.35);
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+/* ------------------------------------------------------------
+   WIND RIPPLES — bangelės/apskritimai fone, tik kontūrai
+   vėjas veikia linijos storį, kryptį (ištempimas) ir tai, kad
+   linija "byra" (spacing tarp taškelių apskritimo kontūre)
+------------------------------------------------------------- */
+const ripples = [];
+function spawnRipple() {
+  ripples.push({
+    x: randBetween(W * 0.2, W * 0.8),
+    y: randBetween(H * 0.2, H * 0.8),
+    r: 4,
+    born: performance.now()
+  });
+}
+setInterval(spawnRipple, 1400);
+
+function drawRipples(time) {
+  const wind = state.windSpeed.value;
+  const dirRad = state.windDirection.value * Math.PI / 180;
+  const stretchX = Math.cos(dirRad) * (wind / state.windSpeed.max) * 0.5;
+  const stretchY = Math.sin(dirRad) * (wind / state.windSpeed.max) * 0.5;
+  const lineWidth = 0.6 + (wind / state.windSpeed.max) * 2.2;
+  const gapChance = 0.15 + (wind / state.windSpeed.max) * 0.55; // kuo daugiau vėjo, tuo labiau "byra"
+
+  for (let i = ripples.length - 1; i >= 0; i--) {
+    const rp = ripples[i];
+    const age = (performance.now() - rp.born) / 1000;
+    const radius = 6 + age * 40;
+    if (radius > Math.max(W, H) * 0.6) { ripples.splice(i, 1); continue; }
+    const alpha = Math.max(0, 0.5 - age * 0.05);
+
+    ctx.save();
+    ctx.translate(rp.x, rp.y);
+    ctx.scale(1 + stretchX, 1 + stretchY);
+    ctx.strokeStyle = tempColor(state.airTemperature.value, alpha);
+    ctx.lineWidth = lineWidth;
+
+    const segments = 90;
+    ctx.beginPath();
+    for (let s = 0; s <= segments; s++) {
+      if (Math.random() < gapChance * 0.02) continue; // taškuoti "plyšiai"
+      const a = (s / segments) * Math.PI * 2;
+      const px = Math.cos(a) * radius;
+      const py = Math.sin(a) * radius;
+      ctx.moveTo(px, py);
+      ctx.lineTo(px + Math.cos(a) * 1.5, py + Math.sin(a) * 1.5);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+/* ------------------------------------------------------------
+   VĖJO RODYKLĖS (arrows) — atsiranda iš vėjo krypties pusės,
+   juda per ekraną, sulėtėja. seaLevelPressure suglaudina jas
+   arčiau viena kitos (mažesnis "jitter" tarp gretimų rodyklių).
+------------------------------------------------------------- */
+let arrows = [];
+const MAX_ARROWS = 140;
+
+function edgeSpawnPoint(dirDeg) {
+  // vėjas "iš" krypties dirDeg -> rodyklės atsiranda priešingam
+  // pakraštyje ir juda ta kryptimi per ekraną
+  const rad = dirDeg * Math.PI / 180;
+  const dx = Math.cos(rad), dy = Math.sin(rad);
+  // pradžios taškas - toli už ekrano ribos priešinga kryptimi
+  const startX = W / 2 - dx * (W);
+  const startY = H / 2 - dy * (H);
+  return {
+    x: startX + randBetween(-W * 0.4, W * 0.4) * Math.abs(dy),
+    y: startY + randBetween(-H * 0.4, H * 0.4) * Math.abs(dx),
+    vx: dx, vy: dy
+  };
+}
+
+function spawnArrow() {
+  if (arrows.length >= MAX_ARROWS) return;
+  const sp = edgeSpawnPoint(state.windDirection.value);
+  arrows.push({
+    x: sp.x, y: sp.y, vx: sp.vx, vy: sp.vy,
+    life: 1,
+    speedMul: randBetween(0.6, 1.2)
+  });
+}
+
+function drawArrows(dt) {
+  const p = state.seaLevelPressure;
+  const norm = (p.value - p.min) / (p.max - p.min);
+  const baseSpeed = 20 + state.windSpeed.value * 18; // px/s scale
+  const slowdown = 0.985; // sulėtėja bėgant laikui
+
+  for (let i = arrows.length - 1; i >= 0; i--) {
+    const a = arrows[i];
+    a.x += a.vx * baseSpeed * dt;
+    a.y += a.vy * baseSpeed * dt;
+    baseSpeed; // (per-arrow slowdown taikomas žemiau)
+    a.speedMul *= slowdown;
+    a.life -= dt * 0.06;
+
+    if (a.life <= 0 || a.x < -50 || a.x > W + 50 || a.y < -50 || a.y > H + 50) {
+      arrows.splice(i, 1);
+      continue;
+    }
+
+    const angle = Math.atan2(a.vy, a.vx);
+    const len = 12 + norm * 4; // pressure daro rodykles šiek tiek "kompaktiškesnes/tvarkingesnes"
+    ctx.save();
+    ctx.translate(a.x, a.y);
+    ctx.rotate(angle);
+    ctx.strokeStyle = tempColor(state.airTemperature.value, a.life * 0.8);
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(-len / 2, 0);
+    ctx.lineTo(len / 2, 0);
+    ctx.lineTo(len / 2 - 4, -3);
+    ctx.moveTo(len / 2, 0);
+    ctx.lineTo(len / 2 - 4, 3);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // gimdymo dažnis priklauso nuo vėjo greičio
+  const spawnChance = 0.05 + (state.windSpeed.value / state.windSpeed.max) * 0.9;
+  if (Math.random() < spawnChance) spawnArrow();
+}
+
+/* ------------------------------------------------------------
+   BLOOM sluoksnis pagal cloudCover — tiesiog minkštas glow
+   sluoksnis virš viso vaizdo naudojant blur filtrą canvas'e
+------------------------------------------------------------- */
+const bloomCanvas = document.createElement('canvas');
+const bloomCtx = bloomCanvas.getContext('2d');
+
+function applyBloom() {
+  const cc = state.cloudCover.value / 100;
+  bloomCanvas.width = W;
+  bloomCanvas.height = H;
+  bloomCtx.clearRect(0, 0, W, H);
+  bloomCtx.filter = `blur(${8 + cc * 20}px)`;
+  bloomCtx.globalAlpha = 0.35 + cc * 0.35;
+  bloomCtx.drawImage(canvas, 0, 0);
+  bloomCtx.filter = 'none';
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.drawImage(bloomCanvas, 0, 0);
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+/* ------------------------------------------------------------
+   HUD — rodo dabartines simuliuotas reikšmes (pašalinsi vėliau,
+   arba paliksi debug'ui)
+------------------------------------------------------------- */
+const hud = document.getElementById('hud');
+function updateHUD() {
+  hud.innerHTML =
+    `<b>cloudCover</b>: ${state.cloudCover.value.toFixed(0)}%<br>` +
+    `<b>seaLevelPressure</b>: ${state.seaLevelPressure.value.toFixed(0)} hPa<br>` +
+    `<b>windSpeed</b>: ${state.windSpeed.value.toFixed(1)} m/s<br>` +
+    `<b>windDirection</b>: ${state.windDirection.value.toFixed(0)}°<br>` +
+    `<b>airTemperature</b>: ${state.airTemperature.value.toFixed(1)} °C`;
+}
+
+/* ------------------------------------------------------------
+   MAIN LOOP
+------------------------------------------------------------- */
+let lastTime = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - lastTime) / 1000);
+  lastTime = now;
+
+  updateState(dt);
+
+  // fonas su trail efektu (nevisiškai išvalom - lieka trail)
+  ctx.fillStyle = 'rgba(5,7,10,0.18)';
+  ctx.fillRect(0, 0, W, H);
+
+  drawPressureDots(now / 1000);
+  drawRipples(now / 1000);
+  drawArrows(dt);
+  applyBloom();
+  updateHUD();
+
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
