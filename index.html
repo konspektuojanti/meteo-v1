@@ -34,6 +34,14 @@
   #panel button:hover { background: #262626; }
   #panel button.active { border-color: #ffb046; color: #ffb046; }
   #fileInput, #imgInput { display: none; }
+  #manualParams { max-height: 220px; overflow-y: auto; }
+  .mp-row { display: flex; align-items: center; gap: 6px; margin: 4px 0; }
+  .mp-row span { flex: 1; font-size: 11px; color: #ccc; }
+  .mp-row input[type=number] {
+    width: 62px; font-size: 11px; padding: 3px 4px; border-radius: 4px;
+    border: 1px solid #555; background: #111; color: #eee;
+  }
+  .mp-row input[type=checkbox] { accent-color: #4aa3ff; }
 </style>
 </head>
 <body>
@@ -51,7 +59,6 @@
   <label><input type="checkbox" data-layer="dither" checked> RGB dither</label>
   <label><input type="checkbox" data-layer="uv" checked> UV glass</label>
   <label><input type="checkbox" data-layer="grain" checked> dust/rain grain</label>
-  <label><input type="checkbox" data-layer="bloom" checked> bloom (clouds)</label>
   <h4 style="margin-top:10px;">Image / video source</h4>
   <div class="src-btns">
     <button id="btnCam">camera</button>
@@ -59,6 +66,9 @@
     <button id="btnImg">photo</button>
     <button id="btnNone" class="active">none</button>
   </div>
+
+  <h4 style="margin-top:10px;">Manual values</h4>
+  <div id="manualParams"></div>
 </div>
 <input type="file" id="imgInput" accept="image/*">
 
@@ -89,7 +99,7 @@ resize();
 /* ------------------------------------------------------------
    LAYER TOGGLES
 ------------------------------------------------------------- */
-const layers = { dots: true, ripples: true, arrows: true, particles: true, dither: true, uv: true, grain: true, bloom: true };
+const layers = { dots: true, ripples: true, arrows: true, particles: true, dither: true, uv: true, grain: true };
 document.querySelectorAll('#panel input[type=checkbox]').forEach(cb => {
   cb.addEventListener('change', () => { layers[cb.dataset.layer] = cb.checked; });
 });
@@ -111,10 +121,13 @@ const state = {
 
 const SIM_UPDATE_MS = 6000;
 function randBetween(a, b) { return a + Math.random() * (b - a); }
+const manualParams = new Set();
+
 function simulateData() {
   // TODO: čia vėliau vietoj random darysi fetch() į savo API
   // ir priskirsi state.<param>.target = realiOsReiksme
   for (const key of ['cloudCover','seaLevelPressure','windSpeed','windDirection','airTemperature','uvIndex','dust','rain']) {
+    if (manualParams.has(key)) continue; // rankiniu būdu įvesta reikšmė — nepersirašom
     const p = state[key];
     const range = p.max - p.min;
     const step = range * randBetween(-0.18, 0.18);
@@ -131,6 +144,51 @@ function updateState(dt) {
     p.value += (p.target - p.value) * Math.min(1, dt * 0.6);
   }
 }
+
+/* ------------------------------------------------------------
+   RANKINIS PARAMETRŲ ĮVEDIMAS
+   Kai naudotojas pažymi "manual" checkbox ir įveda skaičių,
+   ta reikšmė tampa fiksuotu target/value ir simuliacija jos
+   nebekeičia, kol checkbox neatžymėtas.
+------------------------------------------------------------- */
+const paramLabels = {
+  cloudCover: 'cloudCover (%)',
+  seaLevelPressure: 'pressure (hPa)',
+  windSpeed: 'windSpeed (m/s)',
+  windDirection: 'windDir (°)',
+  airTemperature: 'airTemp (°C)',
+  uvIndex: 'uvIndex',
+  dust: 'dust (%)',
+  rain: 'rain (%)'
+};
+const manualParamsEl = document.getElementById('manualParams');
+for (const key of Object.keys(paramLabels)) {
+  const p = state[key];
+  const row = document.createElement('div');
+  row.className = 'mp-row';
+  row.innerHTML = `
+    <input type="checkbox" data-manual="${key}">
+    <span>${paramLabels[key]}</span>
+    <input type="number" data-value="${key}" min="${p.min}" max="${p.max}" step="0.1" value="${p.value.toFixed(1)}" disabled>
+  `;
+  manualParamsEl.appendChild(row);
+}
+manualParamsEl.addEventListener('change', (e) => {
+  const key = e.target.dataset.manual || e.target.dataset.value;
+  if (!key) return;
+  const numInput = manualParamsEl.querySelector(`input[data-value="${key}"]`);
+  const checkbox = manualParamsEl.querySelector(`input[data-manual="${key}"]`);
+  if (e.target.dataset.manual !== undefined && e.target.type === 'checkbox') {
+    if (checkbox.checked) { manualParams.add(key); numInput.disabled = false; }
+    else { manualParams.delete(key); numInput.disabled = true; }
+  }
+  if (e.target.dataset.value && manualParams.has(key)) {
+    const p = state[key];
+    const v = Math.max(p.min, Math.min(p.max, parseFloat(numInput.value)));
+    p.target = v;
+    p.value = v; // iškart, be laipsniško drift'o
+  }
+});
 
 /* ------------------------------------------------------------
    SPALVŲ PALETĖ pagal airTemperature
@@ -317,8 +375,12 @@ function drawPressureDots(time) {
 }
 
 /* ------------------------------------------------------------
-   WIND RIPPLES
+   VĖJO SPALVA — fiksuota tamsiai mėlyna, kad nesusilietų su
+   temperatūros gelsvai-oranžine palete ir liktų matoma
 ------------------------------------------------------------- */
+function windColor(alpha) {
+  return `rgba(40, 70, 140, ${alpha})`;
+}
 const ripples = [];
 setInterval(() => {
   ripples.push({ x: randBetween(W*0.2, W*0.8), y: randBetween(H*0.2, H*0.8), born: performance.now() });
@@ -341,7 +403,7 @@ function drawRipples() {
     ctx.save();
     ctx.translate(rp.x, rp.y);
     ctx.scale(1 + stretchX, 1 + stretchY);
-    ctx.strokeStyle = tempColor(state.airTemperature.value, alpha);
+    ctx.strokeStyle = windColor(alpha);
     ctx.lineWidth = lineWidth;
     const segments = 90;
     ctx.beginPath();
@@ -358,7 +420,10 @@ function drawRipples() {
 }
 
 /* ------------------------------------------------------------
-   VĖJO RODYKLĖS
+   VĖJO RODYKLĖS — baltos pagal nutylėjimą; kai yra vaizdo
+   šaltinis (kamera/video/nuotrauka), kiekviena rodyklė gimdama
+   pasiima to taško spalvą iš vaizdo (sujungta su color particles
+   idėja) ir tą spalvą neša palei save
 ------------------------------------------------------------- */
 let arrows = [];
 const MAX_ARROWS = 140;
@@ -375,7 +440,9 @@ function edgeSpawnPoint(dirDeg) {
 function spawnArrow() {
   if (arrows.length >= MAX_ARROWS) return;
   const sp = edgeSpawnPoint(state.windDirection.value);
-  arrows.push({ x: sp.x, y: sp.y, vx: sp.vx, vy: sp.vy, life: 1, speedMul: randBetween(0.6, 1.2) });
+  const nx = Math.random(), ny = Math.random();
+  const col = sourcePixels ? cellAt(nx, ny) : null;
+  arrows.push({ x: sp.x, y: sp.y, vx: sp.vx, vy: sp.vy, life: 1, speedMul: randBetween(0.6, 1.2), col });
 }
 function drawArrows(dt) {
   const p = state.seaLevelPressure;
@@ -390,7 +457,9 @@ function drawArrows(dt) {
     const len = 12 + norm * 4;
     ctx.save();
     ctx.translate(a.x, a.y); ctx.rotate(angle);
-    ctx.strokeStyle = tempColor(state.airTemperature.value, a.life * 0.8);
+    ctx.strokeStyle = a.col
+      ? `rgba(${Math.min(255,a.col.r+80)|0},${Math.min(255,a.col.g+80)|0},${Math.min(255,a.col.b+80)|0},${a.life*0.85})`
+      : `rgba(255,255,255,${a.life * 0.8})`;
     ctx.lineWidth = 1.4;
     ctx.beginPath();
     ctx.moveTo(-len/2, 0); ctx.lineTo(len/2, 0);
@@ -502,23 +571,7 @@ function drawGrain() {
   ctx.restore();
 }
 
-/* ------------------------------------------------------------
-   BLOOM pagal cloudCover
-------------------------------------------------------------- */
-const bloomCanvas = document.createElement('canvas');
-const bloomCtx = bloomCanvas.getContext('2d');
-function applyBloom() {
-  const cc = state.cloudCover.value / 100;
-  bloomCanvas.width = W; bloomCanvas.height = H;
-  bloomCtx.clearRect(0, 0, W, H);
-  bloomCtx.filter = `blur(${8 + cc * 20}px)`;
-  bloomCtx.globalAlpha = 0.35 + cc * 0.35;
-  bloomCtx.drawImage(canvas, 0, 0);
-  bloomCtx.filter = 'none';
-  ctx.globalCompositeOperation = 'lighter';
-  ctx.drawImage(bloomCanvas, 0, 0);
-  ctx.globalCompositeOperation = 'source-over';
-}
+/* (bloom sluoksnis pašalintas — balino visą vaizdą) */
 
 /* ------------------------------------------------------------
    HUD
@@ -556,7 +609,6 @@ function loop(now) {
   if (layers.dither) drawDither();
   if (layers.uv) drawUVGlass(dt);
   if (layers.grain) drawGrain();
-  if (layers.bloom) applyBloom();
 
   updateHUD();
   requestAnimationFrame(loop);
